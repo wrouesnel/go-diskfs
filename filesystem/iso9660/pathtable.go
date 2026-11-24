@@ -164,9 +164,11 @@ func (pt *pathTable) getLocation(p string) uint32 {
 		for i, entry := range pt.records {
 			// did we find a match for our current level?
 			if entry.parentIndex == level && entry.dirname == current {
-				level = uint16(i)
+				// entries are numbered from 1, as their parents are
+				level = uint16(i + 1)
 				if len(parts) > 1 {
 					parts = parts[1:]
+					current = parts[0]
 				} else {
 					// this is the final one, we found it, keep it
 					location = entry.location
