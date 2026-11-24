@@ -379,9 +379,11 @@ func (fi *finalizeFileInfo) toJolietDirectoryEntry(fsm *FileSystem, isSelf, isPa
 // toJolietDirectory creates a Joliet Directory from a finalizeFileInfo directory.
 // jolietLocation is the block location for this Joliet directory extent.
 // parentJolietLocation is the block location of the parent's Joliet directory extent.
-func (fi *finalizeFileInfo) toJolietDirectory(fsm *FileSystem, jolietLocation, parentJolietLocation uint32) (*Directory, error) {
+// It also returns the children in the order of their entries, which follow
+// "." and "..".
+func (fi *finalizeFileInfo) toJolietDirectory(fsm *FileSystem, jolietLocation, parentJolietLocation uint32) (*Directory, []*finalizeFileInfo, error) {
 	if !fi.IsDir() {
-		return nil, fmt.Errorf("cannot convert a file entry to a directory")
+		return nil, nil, fmt.Errorf("cannot convert a file entry to a directory")
 	}
 	self := fi.toJolietDirectoryEntry(fsm, true, false)
 	self.location = jolietLocation
@@ -410,7 +412,7 @@ func (fi *finalizeFileInfo) toJolietDirectory(fsm *FileSystem, jolietLocation, p
 		directoryEntry: *self,
 		entries:        entries,
 	}
-	return d, nil
+	return d, children, nil
 }
 
 // calculateJolietDirectorySize calculates the byte size of a Joliet directory extent.
@@ -861,6 +863,7 @@ func (fsm *FileSystem) Finalize(options FinalizeOptions) error {
 		// build Joliet directories for each PVD directory, sharing file locations
 		jolietLocations := make([]uint32, len(dirs))
 		jolietDirs = make([]*Directory, len(dirs))
+		jolietChildren := make([][]*finalizeFileInfo, len(dirs))
 
 		// first pass: assign locations and build directory objects
 		for i, dir := range dirs {
@@ -875,7 +878,7 @@ func (fsm *FileSystem) Finalize(options FinalizeOptions) error {
 				}
 			}
 			jolietLocations[i] = location
-			jd, err := dir.toJolietDirectory(fsm, location, parentJolietLoc)
+			jd, children, err := dir.toJolietDirectory(fsm, location, parentJolietLoc)
 			if err != nil {
 				return fmt.Errorf("unable to build Joliet directory for %s: %v", dir.path, err)
 			}
@@ -884,6 +887,7 @@ func (fsm *FileSystem) Finalize(options FinalizeOptions) error {
 			jd.size = uint32(dirSize)
 			jd.entries[0].size = uint32(dirSize) // self entry
 			jolietDirs[i] = jd
+			jolietChildren[i] = children
 			location += blocks
 		}
 
@@ -899,6 +903,21 @@ func (fsm *FileSystem) Finalize(options FinalizeOptions) error {
 						jd.entries[1].size = jolietDirs[j].entries[0].size
 						break
 					}
+				}
+			}
+		}
+
+		// third pass: point subdirectory entries at their Joliet extents,
+		// rather than the PVD tree's they were made with
+		dirIndex := make(map[*finalizeFileInfo]int, len(dirs))
+		for i, d := range dirs {
+			dirIndex[d] = i
+		}
+		for i, jd := range jolietDirs {
+			for k, child := range jolietChildren[i] {
+				if j, ok := dirIndex[child]; ok {
+					jd.entries[2+k].location = jolietLocations[j]
+					jd.entries[2+k].size = jolietDirs[j].entries[0].size
 				}
 			}
 		}
