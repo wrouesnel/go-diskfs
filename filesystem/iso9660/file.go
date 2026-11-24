@@ -32,39 +32,42 @@ func (fl *File) Read(b []byte) (int, error) {
 	if fl == nil || fl.closed {
 		return 0, os.ErrClosed
 	}
-	// we have the DirectoryEntry, so we can get the starting location and size
-	// since iso9660 files are contiguous, we only need the starting location and size
-	//   to get the entire file
+	// we have the DirectoryEntry, so we can get the file's extents: one,
+	// or, for a multi-extent file, several, each contiguous
 	fs := fl.filesystem
-	size := int(fl.size) - int(fl.offset)
-	location := int(fl.location)
-	maxRead := size
-	file := fs.backend
+	size := fl.Size()
 
 	// if there is nothing left to read, just return EOF
-	if size <= 0 {
+	if fl.offset >= size {
 		return 0, io.EOF
 	}
 
 	// we stop when we hit the lesser of
 	//   1- len(b)
 	//   2- file end
-	if len(b) < maxRead {
-		maxRead = len(b)
+	read := 0
+	start := int64(0)
+	for _, e := range fl.fileExtents() {
+		end := start + int64(e.size)
+		if read < len(b) && fl.offset < end {
+			// read what's wanted of this extent, from our offset into it
+			into := fl.offset - start
+			n := int(min(int64(len(b)-read), end-fl.offset))
+			_, err := fs.backend.ReadAt(b[read:read+n], int64(e.location)*fs.blocksize+into)
+			if err != nil && err != io.EOF {
+				return read, err
+			}
+			read += n
+			fl.offset += int64(n)
+		}
+		start = end
 	}
 
-	// just read the requested number of bytes and change our offset
-	_, err := file.ReadAt(b[0:maxRead], int64(location)*fs.blocksize+fl.offset)
-	if err != nil && err != io.EOF {
-		return 0, err
-	}
-
-	fl.offset += int64(maxRead)
 	var retErr error
-	if fl.offset >= int64(fl.size) {
+	if fl.offset >= size {
 		retErr = io.EOF
 	}
-	return maxRead, retErr
+	return read, retErr
 }
 
 // Write writes len(b) bytes to the File.
@@ -84,7 +87,7 @@ func (fl *File) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekStart:
 		newOffset = offset
 	case io.SeekEnd:
-		newOffset = int64(fl.size) + offset
+		newOffset = fl.Size() + offset
 	case io.SeekCurrent:
 		newOffset = fl.offset + offset
 	}

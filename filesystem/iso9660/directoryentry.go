@@ -43,6 +43,69 @@ type directoryEntry struct {
 	filesystem               *FileSystem
 	filename                 string
 	extensions               []directoryEntrySystemUseExtension
+	// extents are a file's extents, in order, when it's recorded in more
+	// than one ("multi-extent", ISO 9660 level 3, for files of 4 GiB or
+	// more): its records, all but the last flagged hasMoreEntries. It's nil
+	// for a file in one extent, location and size.
+	extents []fileExtent
+}
+
+// fileExtent is one of a file's extents.
+type fileExtent struct {
+	location uint32
+	size     uint32
+}
+
+// fileExtents are the file's extents: its one, or each of a multi-extent
+// file's.
+func (de *directoryEntry) fileExtents() []fileExtent {
+	if de.extents != nil {
+		return de.extents
+	}
+
+	return []fileExtent{{location: de.location, size: de.size}}
+}
+
+// joinExtents makes each multi-extent file in a directory's entries one
+// entry: a run of entries with the same name, all but the last flagged
+// hasMoreEntries, as ECMA-119 9.1.6 records them. An unfinished run is
+// left as it is.
+func joinExtents(entries []*directoryEntry) []*directoryEntry {
+	out := make([]*directoryEntry, 0, len(entries))
+
+	for i := 0; i < len(entries); i++ {
+		de := entries[i]
+		if !de.hasMoreEntries || de.isSubdirectory {
+			out = append(out, de)
+			continue
+		}
+
+		j := i
+		for j < len(entries)-1 && entries[j].hasMoreEntries && entries[j+1].filename == de.filename {
+			j++
+		}
+
+		if entries[j].hasMoreEntries {
+			// No final extent: not a whole file.
+			out = append(out, entries[i:j+1]...)
+			i = j
+
+			continue
+		}
+
+		joined := *de
+		joined.hasMoreEntries = false
+		joined.extents = make([]fileExtent, 0, j-i+1)
+
+		for _, part := range entries[i : j+1] {
+			joined.extents = append(joined.extents, fileExtent{location: part.location, size: part.size})
+		}
+
+		out = append(out, &joined)
+		i = j
+	}
+
+	return out
 }
 
 func (de *directoryEntry) countNamelenBytes() int {
@@ -373,7 +436,7 @@ func parseDirEntries(b []byte, f *FileSystem) ([]*directoryEntry, error) {
 		}
 		i += entryLen
 	}
-	return dirEntries, nil
+	return joinExtents(dirEntries), nil
 }
 
 // parseDirEntriesJoliet parses directory entries from a Joliet (SVD) directory extent.
@@ -395,7 +458,7 @@ func parseDirEntriesJoliet(b []byte, f *FileSystem) ([]*directoryEntry, error) {
 		dirEntries = append(dirEntries, de)
 		i += entryLen
 	}
-	return dirEntries, nil
+	return joinExtents(dirEntries), nil
 }
 
 // get the location of a particular path relative to this directory
@@ -513,7 +576,12 @@ func (de *directoryEntry) Name() string {
 
 // Size() int64        // length in bytes for regular files; system-dependent for others
 func (de *directoryEntry) Size() int64 {
-	return int64(de.size)
+	var size int64
+	for _, e := range de.fileExtents() {
+		size += int64(e.size)
+	}
+
+	return size
 }
 
 // Mode() FileMode     // file mode bits
